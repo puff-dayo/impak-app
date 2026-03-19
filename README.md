@@ -8,6 +8,8 @@ This is a multi-platform desktop GUI application to browse, view and export from
 
 Make sure Nuitka, Pyside6, impakdecoder and other platform-specific dependencies are present.
 
+Built binary for Windows x64 can be downloaded from [Release](https://github.com/puff-dayo/impak-app/releases/download/v26.03.19/impakViewer_msvc_x64.zip).
+
 ## impak-decoder
 
 This is a decoder-only, lightweight package for impak, the image collection format. For encoding and more API or CLI tool usage, check the package [impak](https://github.com/puff-dayo/impak).
