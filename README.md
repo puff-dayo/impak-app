@@ -8,7 +8,14 @@ This is a multi-platform desktop GUI application to browse, view and export from
 
 Make sure Nuitka, Pyside6, impakdecoder and other platform-specific dependencies are present.
 
-Built binary for Windows x64 can be downloaded from [Release](https://github.com/puff-dayo/impak-app/releases/download/v26.03.19/impakViewer_msvc_x64.zip).
+Built portable EXE binary for Windows x64 can be downloaded from [Release](https://github.com/puff-dayo/impak-app/releases/download/v26.03.19/impakViewer_msvc_x64.zip).
+
+## impak-viewer-android
+
+This is an Android application to browse, view and export from impak files.
+
+Built APK binary for Android 8.0+, armv8 can be downloaded from [Release](https://github.com/puff-dayo/impak-app/releases/download/v26.03.19/impakViewer_armv8.apk).
+
 
 ## impak-decoder
 
