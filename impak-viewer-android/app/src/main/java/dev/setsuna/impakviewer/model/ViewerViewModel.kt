@@ -108,14 +108,18 @@ class ViewerViewModel : ViewModel() {
                 val (reader, fileName, fileSize) = withContext(Dispatchers.IO) {
                     val cr = context.contentResolver
                     val name = cr.query(uri, null, null, null, null)?.use { cursor ->
-                        val col =
-                            cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        val col = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
                         cursor.moveToFirst()
                         if (col >= 0) cursor.getString(col) else "unknown.impak"
                     } ?: uri.lastPathSegment ?: "unknown.impak"
                     val size = cr.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
-                    val stream = cr.openInputStream(uri) ?: error("Cannot open stream")
-                    Triple(ImpakReader(stream), name, size)
+
+                    val tempFile = java.io.File(context.cacheDir, "current.impak")
+                    cr.openInputStream(uri)?.use { input ->
+                        tempFile.outputStream().use { output -> input.copyTo(output) }
+                    } ?: error("Cannot open stream")
+
+                    Triple(ImpakReader(tempFile), name, size)
                 }
                 _reader = reader
                 _fileName = fileName
@@ -134,10 +138,7 @@ class ViewerViewModel : ViewModel() {
                 )
                 setStatus("$fileName  ·  ${reader.frameCount} frames")
 
-                // Show first frame
                 goTo(0)
-
-                // Stream thumbnails in background
                 loadThumbnails(reader)
 
             } catch (e: Exception) {
@@ -154,7 +155,7 @@ class ViewerViewModel : ViewModel() {
         val reader = _reader ?: return
         if (index !in 0..<frameCount) return
         currentIndex = index
-        _goToJob?.cancel()                          // cancel any in-flight decode
+        _goToJob?.cancel()
         _goToJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val bmp = reader.getFrame(index)
@@ -190,7 +191,7 @@ class ViewerViewModel : ViewModel() {
                     val thumbW = 140
                     val thumbH = (bmp.height * 140f / bmp.width).toInt().coerceAtLeast(1)
                     val thumb = bmp.scale(thumbW, thumbH)
-                    if (i < frames.size) frames[i] = bmp else frames.add(bmp)
+                    bmp.recycle()
                     val name = reader.getName(i)
                     val isKey = reader.isKeyframe(i)
                     list.add(FrameThumb(i, thumb, name, isKey))

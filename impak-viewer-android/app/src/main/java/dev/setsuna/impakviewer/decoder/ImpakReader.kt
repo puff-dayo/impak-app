@@ -4,31 +4,30 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import org.json.JSONObject
-import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.zip.InflaterInputStream
 
-class ImpakReader(inputStream: InputStream) : AutoCloseable {
-    private val _data: ByteArray = inputStream.use { it.readBytes() }
-    private val _buf: ByteBuffer = ByteBuffer.wrap(_data).order(ByteOrder.LITTLE_ENDIAN)
+class ImpakReader(_file: java.io.File) : AutoCloseable {
+    private val _raf = java.io.RandomAccessFile(_file, "r")
 
     val header: FileHeader
     private val _index: List<FrameIndexEntry>
     private val _baselineCount: Int
 
-    private val _decodeCache = object : LinkedHashMap<Int, Bitmap>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Bitmap>): Boolean {
-            if (size > MAX_CACHE_FRAMES) {
-                eldest.value.recycle()
-                return true
-            }
-            return false
-        }
-    }
+    private val _decodeCache = LinkedHashMap<Int, Bitmap>(16, 0.75f, true)
 
     companion object {
         private const val MAX_CACHE_FRAMES = 10
+    }
+
+    private fun cachePut(absId: Int, bmp: Bitmap) {
+        _decodeCache[absId] = bmp
+        while (_decodeCache.size > MAX_CACHE_FRAMES) {
+            val eldest = _decodeCache.entries.first()
+            _decodeCache.remove(eldest.key)
+            if (!eldest.value.isRecycled) eldest.value.recycle()
+        }
     }
 
     private val _metaCache = mutableMapOf<Int, Map<String, Any>>()
@@ -78,28 +77,46 @@ class ImpakReader(inputStream: InputStream) : AutoCloseable {
     fun getIndexEntry(index: Int): FrameIndexEntry = _index[contentToAbs(index)]
 
     override fun close() {
+        _decodeCache.values.forEach { it.recycle() }
         _decodeCache.clear()
+        _raf.close()
     }
 
     private fun decodeFrame(absId: Int): Bitmap {
-        _decodeCache[absId]?.let { return it.copy(it.config ?: Bitmap.Config.ARGB_8888, false) }
+        _decodeCache[absId]?.let { cached ->
+            if (!cached.isRecycled) return cached.copy(Bitmap.Config.ARGB_8888, false)
+        }
 
         val entry = _index[absId]
         val bmp: Bitmap
 
         if (entry.frameType == FRAME_KEYFRAME) {
-            val patches = readPatches(absId)
-            check(patches.size == 1) { "Keyframe must have exactly 1 patch" }
-            bmp = decompressPatchToBitmap(patches[0].data)
+            bmp = decodePatches(absId)
         } else {
             val refBmp = decodeFrame(entry.refFrameId)
             val patches = readPatches(absId)
             bmp = reconstruct(refBmp, patches)
+            refBmp.recycle()
         }
 
-        val argb = bmp.copy(Bitmap.Config.ARGB_8888, false)
-        _decodeCache[absId] = argb
+        val argb = if (bmp.config == Bitmap.Config.ARGB_8888) bmp
+        else bmp.copy(Bitmap.Config.ARGB_8888, false).also { bmp.recycle() }
+
+        cachePut(absId, argb)
         return argb.copy(Bitmap.Config.ARGB_8888, false)
+    }
+
+    private fun decodePatches(absId: Int): Bitmap {
+        val entry = _index[absId]
+        val headerBuf = bufAt(entry.dataOffset.toInt(), PATCH_HEADER_SIZE)
+        val x = headerBuf.short.toInt() and 0xFFFF
+        val y = headerBuf.short.toInt() and 0xFFFF
+        headerBuf.position(headerBuf.position() + 4)
+        val dataLen = headerBuf.int
+        val dataOffset = entry.dataOffset.toInt() + PATCH_HEADER_SIZE
+        val dataBuf = bufAt(dataOffset, dataLen)
+        val data = ByteArray(dataLen).also { dataBuf.get(it) }
+        return decompressPatchToBitmap(data)
     }
 
     private fun reconstruct(base: Bitmap, patches: List<RawPatch>): Bitmap {
@@ -124,18 +141,17 @@ class ImpakReader(inputStream: InputStream) : AutoCloseable {
     }
 
     private fun readFileHeader(): FileHeader {
-        _buf.position(0)
-        val magic = ByteArray(6).also { _buf.get(it) }
+        val buf = bufAt(0, FILE_HEADER_SIZE)
+        val magic = ByteArray(6).also { buf.get(it) }
         if (!magic.contentEquals(IMPAK_MAGIC)) error("Not a valid .impak file (bad magic)")
-        val version = _buf.get().toInt() and 0xFF
-        val diffMode = _buf.get().toInt() and 0xFF
-        val frameCount = _buf.int
-        val indexOffset = _buf.long
-        val width = _buf.int
-        val height = _buf.int
-        val codec = _buf.get().toInt() and 0xFF
-        val quality = _buf.get().toInt() and 0xFF
-        // position == 30  ✓
+        val version = buf.get().toInt() and 0xFF
+        val diffMode = buf.get().toInt() and 0xFF
+        val frameCount = buf.int
+        val indexOffset = buf.long
+        val width = buf.int
+        val height = buf.int
+        val codec = buf.get().toInt() and 0xFF
+        val quality = buf.get().toInt() and 0xFF
         return FileHeader(
             magic, version, diffMode, frameCount, indexOffset, width, height, codec, quality
         )
@@ -143,8 +159,8 @@ class ImpakReader(inputStream: InputStream) : AutoCloseable {
 
     private fun readPatches(absId: Int): List<RawPatch> {
         val entry = _index[absId]
-        val buf = bufAt(entry.dataOffset.toInt())
-        val fileSize = _data.size
+        val buf = bufForFrame(absId)
+        val fileSize = _raf.length()
         return List(entry.patchCount) {
             val x = buf.short.toInt() and 0xFFFF
             val y = buf.short.toInt() and 0xFFFF
@@ -163,8 +179,8 @@ class ImpakReader(inputStream: InputStream) : AutoCloseable {
 
     private fun readPatchHeaders(absId: Int): List<PatchRect> {
         val entry = _index[absId]
-        val buf = bufAt(entry.dataOffset.toInt())
-        val fileSize = _data.size
+        val buf = bufForFrame(absId)
+        val fileSize = _raf.length()
         return List(entry.patchCount) {
             val x = buf.short.toInt() and 0xFFFF
             val y = buf.short.toInt() and 0xFFFF
@@ -188,7 +204,7 @@ class ImpakReader(inputStream: InputStream) : AutoCloseable {
             _metaCache[absId] = emptyMap()
             return emptyMap()
         }
-        val buf = bufAt(entry.dataOffset.toInt())
+        val buf = bufForFrame(absId)
         repeat(entry.patchCount) {
             buf.position(buf.position() + 8)
             val dataLen = buf.int
@@ -206,7 +222,8 @@ class ImpakReader(inputStream: InputStream) : AutoCloseable {
     }
 
     private fun readIndex(): List<FrameIndexEntry> {
-        val buf = bufAt(header.indexOffset.toInt())
+        val length = header.frameCount * FRAME_INDEX_ENTRY_SIZE
+        val buf = bufAt(header.indexOffset.toInt(), length)
         return List(header.frameCount) {
             val dataOffset = buf.long
             val patchCount = buf.int
@@ -232,8 +249,23 @@ class ImpakReader(inputStream: InputStream) : AutoCloseable {
     private fun zlibDecompress(data: ByteArray): ByteArray =
         InflaterInputStream(data.inputStream()).use { it.readBytes() }
 
-    private fun bufAt(position: Int): ByteBuffer =
-        _buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).also { it.position(position) }
+    private fun bufAt(position: Int, length: Int): ByteBuffer {
+        val bytes = ByteArray(length)
+        _raf.seek(position.toLong())
+        _raf.readFully(bytes)
+        return ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    }
+
+    private fun bufForFrame(absId: Int): ByteBuffer {
+        val entry = _index[absId]
+        val start = entry.dataOffset.toInt()
+        val end = if (absId + 1 < _index.size) {
+            _index[absId + 1].dataOffset.toInt()
+        } else {
+            _raf.length().toInt()
+        }
+        return bufAt(start, end - start)
+    }
 }
 
 
