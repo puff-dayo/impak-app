@@ -55,23 +55,19 @@ fun ZoomableImage(
             .background(DarkCanvas)
             .pointerInput(bitmap) {
                 size = this.size
-                detectTransformGestures { centroid, pan, zoom, _ ->
+                detectTransformGestures { centroid, _, zoom, _ ->
+                    if (zoom == 1f) return@detectTransformGestures
                     val newScale = (scale * zoom).coerceIn(0.5f, 8f)
 
-                    if (zoom != 1f) {
-                        val centroidInContent = centroid - Offset(
-                            size.width / 2f,
-                            size.height / 2f,
-                        )
-                        offset =
-                            (offset - centroidInContent) * (newScale / scale) + centroidInContent
-                    }
-
-                    scale = newScale
+                    val centroidInContent = centroid - Offset(
+                        size.width  / 2f,
+                        size.height / 2f,
+                    )
+                    offset = (offset - centroidInContent) * (newScale / scale) + centroidInContent
+                    scale  = newScale
 
                     if (scale > 1f) {
-                        offset += pan
-                        val maxX = size.width * (scale - 1f) / 2f
+                        val maxX = size.width  * (scale - 1f) / 2f
                         val maxY = size.height * (scale - 1f) / 2f
                         offset = Offset(
                             offset.x.coerceIn(-maxX, maxX),
@@ -118,17 +114,28 @@ fun ZoomableImage(
             .pointerInput(bitmap) {
                 size = this.size
                 var swipeFired = false
-                detectHorizontalDragGestures(
+                detectDragGestures(
+                    onDragStart  = { swipeFired = false },
                     onDragEnd    = { swipeFired = false; onScrubDrag?.invoke(null) },
                     onDragCancel = { swipeFired = false; onScrubDrag?.invoke(null) },
                 ) { change, dragAmount ->
-                    if (scale <= 1f) {
-                        change.consume()
-                        onScrubDrag?.invoke(dragAmount)
+                    change.consume()
+                    if (scale > 1f) {
+                        // Pan
+                        offset += dragAmount
+                        val maxX = size.width  * (scale - 1f) / 2f
+                        val maxY = size.height * (scale - 1f) / 2f
+                        offset = Offset(
+                            offset.x.coerceIn(-maxX, maxX),
+                            offset.y.coerceIn(-maxY, maxY),
+                        )
+                    } else {
+                        // Swipe
+                        onScrubDrag?.invoke(dragAmount.x)
                         if (!swipeFired) {
                             when {
-                                dragAmount < -30f -> { onSwipeLeft();  swipeFired = true }
-                                dragAmount > 30f  -> { onSwipeRight(); swipeFired = true }
+                                dragAmount.x < -30f -> { onSwipeLeft();  swipeFired = true }
+                                dragAmount.x >  30f -> { onSwipeRight(); swipeFired = true }
                             }
                         }
                     }
