@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.graphics.scale
+import kotlinx.coroutines.delay
 
 data class FrameThumb(
     val index: Int,
@@ -111,7 +112,8 @@ class ViewerViewModel : ViewModel() {
                 val (reader, fileName, fileSize) = withContext(Dispatchers.IO) {
                     val cr = context.contentResolver
                     val name = cr.query(uri, null, null, null, null)?.use { cursor ->
-                        val col = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        val col =
+                            cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
                         cursor.moveToFirst()
                         if (col >= 0) cursor.getString(col) else "unknown.impak"
                     } ?: uri.lastPathSegment ?: "unknown.impak"
@@ -159,25 +161,23 @@ class ViewerViewModel : ViewModel() {
         if (index !in 0..<frameCount) return
         currentIndex = index
         _goToJob?.cancel()
-        if (viewerState is ViewerState.Ready) {
-            isDecodingFrame = true
-        }
+        if (viewerState is ViewerState.Ready) isDecodingFrame = true
+
         _goToJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(200L)
             try {
-                val bmp = reader.getFrame(index)
-                val fi = buildFrameInfo(reader, index)
+                val bmp = reader.getFrame(currentIndex)
+                val fi = buildFrameInfo(reader, currentIndex)
                 withContext(Dispatchers.Main) {
                     viewerState = ViewerState.Ready(bmp)
                     frameInfo = fi
                     isDecodingFrame = false
                 }
             } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) {
-                    return@launch
-                }
+                if (e is kotlinx.coroutines.CancellationException) return@launch
                 withContext(Dispatchers.Main) {
                     isDecodingFrame = false
-                    setStatus("Error loading frame $index: ${e.message}", error = true)
+                    setStatus("Error loading frame $currentIndex: ${e.message}", error = true)
                 }
             }
         }

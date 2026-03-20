@@ -117,20 +117,19 @@ fun ZoomableImage(
             }
             .pointerInput(bitmap) {
                 size = this.size
+                var swipeFired = false
                 detectHorizontalDragGestures(
-                    onDragEnd = {
-                        onScrubDrag?.invoke(null)
-                    },
-                    onDragCancel = {
-                        onScrubDrag?.invoke(null)
-                    },
+                    onDragEnd    = { swipeFired = false; onScrubDrag?.invoke(null) },
+                    onDragCancel = { swipeFired = false; onScrubDrag?.invoke(null) },
                 ) { change, dragAmount ->
                     if (scale <= 1f) {
                         change.consume()
                         onScrubDrag?.invoke(dragAmount)
-                        when {
-                            dragAmount < -30f -> onSwipeLeft()
-                            dragAmount > 30f -> onSwipeRight()
+                        if (!swipeFired) {
+                            when {
+                                dragAmount < -30f -> { onSwipeLeft();  swipeFired = true }
+                                dragAmount > 30f  -> { onSwipeRight(); swipeFired = true }
+                            }
                         }
                     }
                 }
