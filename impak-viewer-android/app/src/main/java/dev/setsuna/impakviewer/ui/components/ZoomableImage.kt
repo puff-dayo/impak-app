@@ -25,6 +25,7 @@ fun ZoomableImage(
     onSwipeRight: () -> Unit,
     onTapLeft: () -> Unit,
     onTapRight: () -> Unit,
+    onScrubDrag: ((dragAmount: Float?) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
@@ -117,11 +118,16 @@ fun ZoomableImage(
             .pointerInput(bitmap) {
                 size = this.size
                 detectHorizontalDragGestures(
-                    onDragEnd = {},
-                    onDragCancel = {},
+                    onDragEnd = {
+                        onScrubDrag?.invoke(null)
+                    },
+                    onDragCancel = {
+                        onScrubDrag?.invoke(null)
+                    },
                 ) { change, dragAmount ->
                     if (scale <= 1f) {
                         change.consume()
+                        onScrubDrag?.invoke(dragAmount)
                         when {
                             dragAmount < -30f -> onSwipeLeft()
                             dragAmount > 30f -> onSwipeRight()

@@ -86,6 +86,9 @@ class ViewerViewModel : ViewModel() {
     var statusError by mutableStateOf(false)
         private set
 
+    var isDecodingFrame by mutableStateOf(false)
+        private set
+
     fun getMemoryStatus(): String {
         val usedMb = Debug.getNativeHeapAllocatedSize() / 1_048_576L
         return "Mem used: ${usedMb}MB"
@@ -156,6 +159,9 @@ class ViewerViewModel : ViewModel() {
         if (index !in 0..<frameCount) return
         currentIndex = index
         _goToJob?.cancel()
+        if (viewerState is ViewerState.Ready) {
+            isDecodingFrame = true
+        }
         _goToJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val bmp = reader.getFrame(index)
@@ -163,10 +169,14 @@ class ViewerViewModel : ViewModel() {
                 withContext(Dispatchers.Main) {
                     viewerState = ViewerState.Ready(bmp)
                     frameInfo = fi
+                    isDecodingFrame = false
                 }
             } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) return@launch
+                if (e is kotlinx.coroutines.CancellationException) {
+                    return@launch
+                }
                 withContext(Dispatchers.Main) {
+                    isDecodingFrame = false
                     setStatus("Error loading frame $index: ${e.message}", error = true)
                 }
             }

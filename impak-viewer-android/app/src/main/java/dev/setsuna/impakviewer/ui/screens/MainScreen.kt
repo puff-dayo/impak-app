@@ -4,6 +4,8 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -39,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -72,6 +76,9 @@ import dev.setsuna.impakviewer.ui.theme.TextDimLight
 import dev.setsuna.impakviewer.ui.theme.TextPrimary
 import dev.setsuna.impakviewer.ui.theme.TextPrimaryLight
 import kotlinx.coroutines.delay
+import androidx.compose.animation.AnimatedVisibility
+
+private const val SCRUBBER_HIDE_DELAY_MS = 1_800L
 
 @Composable
 fun MainScreen(viewModel: ViewerViewModel) {
@@ -103,6 +110,20 @@ fun MainScreen(viewModel: ViewerViewModel) {
             memText = viewModel.getMemoryStatus()
             delay(3000L)
         }
+    }
+
+    var showScrubber by remember { mutableStateOf(false) }
+    var scrubberGeneration by remember { mutableIntStateOf(0) }
+
+    fun notifyScrubActivity() {
+        showScrubber = true
+        scrubberGeneration++
+    }
+
+    LaunchedEffect(scrubberGeneration) {
+        if (scrubberGeneration == 0) return@LaunchedEffect
+        delay(SCRUBBER_HIDE_DELAY_MS)
+        showScrubber = false
     }
 
     Box(
@@ -138,7 +159,10 @@ fun MainScreen(viewModel: ViewerViewModel) {
                 Spacer(Modifier.width(4.dp))
 
                 IconButton(
-                    onClick = { viewModel.prevFrame() },
+                    onClick = {
+                        viewModel.prevFrame()
+                        notifyScrubActivity()
+                    },
                     enabled = viewModel.currentIndex > 0,
                 ) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, "Previous", tint = primary)
@@ -152,7 +176,10 @@ fun MainScreen(viewModel: ViewerViewModel) {
                 )
 
                 IconButton(
-                    onClick = { viewModel.nextFrame() },
+                    onClick = {
+                        viewModel.nextFrame()
+                        notifyScrubActivity()
+                    },
                     enabled = viewModel.currentIndex < viewModel.frameCount - 1,
                 ) {
                     Icon(Icons.AutoMirrored.Filled.ArrowForward, "Next", tint = primary)
@@ -205,10 +232,25 @@ fun MainScreen(viewModel: ViewerViewModel) {
                     is ViewerState.Ready -> {
                         ZoomableImage(
                             bitmap = state.bitmap,
-                            onSwipeLeft = { viewModel.nextFrame() },
-                            onSwipeRight = { viewModel.prevFrame() },
-                            onTapLeft = { viewModel.prevFrame() },
-                            onTapRight = { viewModel.nextFrame() },
+                            onSwipeLeft = {
+                                viewModel.nextFrame()
+                                notifyScrubActivity()
+                            },
+                            onSwipeRight = {
+                                viewModel.prevFrame()
+                                notifyScrubActivity()
+                            },
+                            onTapLeft = {
+                                viewModel.prevFrame()
+                                notifyScrubActivity()
+                            },
+                            onTapRight = {
+                                viewModel.nextFrame()
+                                notifyScrubActivity()
+                            },
+                            onScrubDrag = { dragAmount ->
+                                if (dragAmount != null) notifyScrubActivity()
+                            },
                             modifier = Modifier.fillMaxSize(),
                         )
                         Row(modifier = Modifier.fillMaxSize()) {
@@ -216,13 +258,50 @@ fun MainScreen(viewModel: ViewerViewModel) {
                                 modifier = Modifier
                                     .fillMaxHeight()
                                     .fillMaxWidth(0.10f)
-                                    .clickable { viewModel.prevFrame() })
+                                    .clickable {
+                                        viewModel.prevFrame()
+                                        notifyScrubActivity()
+                                    })
                             Spacer(modifier = Modifier.weight(1f))
                             Box(
                                 modifier = Modifier
                                     .fillMaxHeight()
                                     .fillMaxWidth(0.10f)
-                                    .clickable { viewModel.nextFrame() })
+                                    .clickable {
+                                        viewModel.nextFrame()
+                                        notifyScrubActivity()
+                                    })
+                        }
+
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = viewModel.isDecodingFrame,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(12.dp)
+                                .zIndex(5f),
+                            enter = fadeIn(),
+                            exit = fadeOut(),
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = accent,
+                                strokeWidth = 2.dp,
+                            )
+                        }
+
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = showScrubber && viewModel.frameCount > 0,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .zIndex(5f),
+                            enter = fadeIn(),
+                            exit = fadeOut(),
+                        ) {
+                            FrameScrubber(
+                                currentIndex = viewModel.currentIndex,
+                                frameCount = viewModel.frameCount,
+                                isDark = isDark,
+                            )
                         }
                     }
                 }
@@ -304,6 +383,62 @@ fun MainScreen(viewModel: ViewerViewModel) {
         }
     }
 }
+
+@Composable
+private fun FrameScrubber(
+    currentIndex: Int,
+    frameCount: Int,
+    isDark: Boolean,
+) {
+    val accent = if (isDark) Accent else AccentLight
+    val dim = if (isDark) TextDim else TextDimLight
+    val trackBg = if (isDark)
+        androidx.compose.ui.graphics.Color(0x88000000)
+    else
+        androidx.compose.ui.graphics.Color(0x88FFFFFF)
+
+    val progress = if (frameCount > 1) currentIndex.toFloat() / (frameCount - 1).toFloat() else 0f
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = "${currentIndex + 1} / $frameCount",
+            fontSize = 10.sp,
+            color = dim,
+        )
+
+        // Progress track
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(trackBg, RoundedCornerShape(50)),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(progress.coerceIn(0f, 1f))
+                    .fillMaxHeight()
+                    .background(accent, RoundedCornerShape(50)),
+            )
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 0.dp)
+                    .fillMaxWidth(progress.coerceIn(0f, 1f))
+                    .wrapContentWidth(Alignment.End)
+                    .size(8.dp)
+                    .background(accent, RoundedCornerShape(50)),
+            )
+        }
+    }
+}
+
 
 @Composable
 private fun WelcomeHint(isDark: Boolean) {
