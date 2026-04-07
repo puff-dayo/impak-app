@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QSizePolicy,
-    QAbstractItemView,
+    QAbstractItemView, QCheckBox, QInputDialog,
 )
 from impakdecoder import ImpakReader
 from impakdecoder.formats import FRAME_KEYFRAME, MODE_NAMES
@@ -57,6 +58,16 @@ def resource_path(name: str) -> str:
     return str(base / name)
 
 
+def app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def settings_path() -> Path:
+    return app_base_dir() / "ipak-viewer-settings.json"
+
+
 class ImpakViewer(QMainWindow):
     def __init__(self, filepath: Optional[str] = None):
         super().__init__()
@@ -74,7 +85,13 @@ class ImpakViewer(QMainWindow):
         self._current_pil_image: Optional[Image.Image] = None
         self._zoom_value: float = 1.0
         self._fit_mode: bool = True
-        self._dark_mode: bool = True
+
+        settings = self._load_settings()
+        self._dark_mode: bool = settings.get("theme", "dark") == "dark"
+        self._low_ram_mode: bool = settings.get("low_ram_mode", False)
+        self._low_ram_cache_size: int = settings.get("low_ram_cache_size", 2)
+
+        Palette.set_theme("dark" if self._dark_mode else "light")
 
         self.setAcceptDrops(True)
 
@@ -87,6 +104,52 @@ class ImpakViewer(QMainWindow):
             self._open_file(filepath)
         else:
             self._show_welcome()
+
+    @staticmethod
+    def _default_settings() -> dict:
+        return {
+            "theme": "dark",
+            "low_ram_mode": False,
+            "low_ram_cache_size": 2,
+        }
+
+    def _load_settings(self) -> dict:
+        path = settings_path()
+        data = self._default_settings()
+
+        try:
+            if path.exists():
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    data.update(raw)
+        except Exception:
+            print(Exception)
+
+        theme = data.get("theme", "dark")
+        if theme not in ("dark", "light"):
+            data["theme"] = "dark"
+
+        try:
+            cache_size = int(data.get("low_ram_cache_size", 2))
+        except Exception:
+            print(Exception)
+            cache_size = 2
+        data["low_ram_cache_size"] = max(0, cache_size)
+
+        data["low_ram_mode"] = bool(data.get("low_ram_mode", False))
+        return data
+
+    def _save_settings(self) -> None:
+        path = settings_path()
+        data = {
+            "theme": "dark" if self._dark_mode else "light",
+            "low_ram_mode": self._low_ram_mode,
+            "low_ram_cache_size": self._low_ram_cache_size,
+        }
+        try:
+            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            print(Exception)
 
     def _setup_style(self) -> None:
         db = Palette.DARK_BG()
@@ -334,6 +397,20 @@ class ImpakViewer(QMainWindow):
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
+
+        self._low_ram_checkbox = QCheckBox("Low RAM")
+        self._low_ram_checkbox.setChecked(self._low_ram_mode)
+        self._low_ram_checkbox.setToolTip("Keep only a small decoded-frame cache in memory")
+        self._low_ram_checkbox.toggled.connect(self._set_low_ram_mode)
+        tb.addWidget(self._low_ram_checkbox)
+
+        self._low_ram_cfg_btn = QPushButton()
+        self._low_ram_cfg_btn.clicked.connect(self._configure_low_ram_cache)
+        tb.addWidget(self._low_ram_cfg_btn)
+
+        self._sync_low_ram_controls()
+
+        tb.addSeparator()
 
         self._zoom_out_btn = QPushButton("−")
         self._zoom_in_btn = QPushButton("+")
@@ -634,6 +711,55 @@ class ImpakViewer(QMainWindow):
         if path:
             self._open_file(path)
 
+    def _set_low_ram_mode(self, enabled: bool) -> None:
+        self._low_ram_mode = bool(enabled)
+        self._sync_low_ram_controls()
+        self._save_settings()
+
+        if self._filepath:
+            current = self._current_idx
+            path = str(self._filepath)
+            self._open_file(path)
+            self._go_to(current)
+
+        state = "ON" if self._low_ram_mode else "OFF"
+        self._set_status(f"Low-RAM mode {state}")
+
+    def _sync_low_ram_controls(self) -> None:
+        if self._low_ram_mode:
+            self._low_ram_cfg_btn.setEnabled(True)
+            self._low_ram_cfg_btn.setText(f"Cache {self._low_ram_cache_size}")
+            self._low_ram_cfg_btn.setToolTip("Set decoded-frame cache size used in low-RAM mode")
+        else:
+            self._low_ram_cfg_btn.setEnabled(False)
+            self._low_ram_cfg_btn.setText("Cache ALL")
+            self._low_ram_cfg_btn.setToolTip("Low-RAM mode is off, so all decoded frames may be kept")
+
+    def _configure_low_ram_cache(self) -> None:
+        value, ok = QInputDialog.getInt(
+            self,
+            "Low-RAM cache size",
+            "Decoded frames to keep in memory:",
+            self._low_ram_cache_size,
+            0,
+            9999,
+            1,
+        )
+        if not ok:
+            return
+
+        self._low_ram_cache_size = value
+        self._low_ram_cfg_btn.setText(f"Cache {self._low_ram_cache_size}")
+        self._save_settings()
+
+        if self._low_ram_mode and self._filepath:
+            current = self._current_idx
+            path = str(self._filepath)
+            self._open_file(path)
+            self._go_to(current)
+
+        self._set_status(f"Low-RAM cache size set to {self._low_ram_cache_size}")
+
     def _open_file(self, path: str) -> None:
         try:
             if self._thumb_loader and self._thumb_loader.isRunning():
@@ -643,7 +769,11 @@ class ImpakViewer(QMainWindow):
             if self._reader:
                 self._reader.close()
 
-            self._reader = ImpakReader(path)
+            self._reader = ImpakReader(
+                path,
+                low_ram_mode=self._low_ram_mode,
+                cache_size=self._low_ram_cache_size,
+            )
             self._filepath = Path(path)
             self._current_idx = 0
             self._thumb_list.clear()
@@ -913,6 +1043,7 @@ class ImpakViewer(QMainWindow):
     def _toggle_theme(self) -> None:
         Palette.set_theme("light" if Palette.is_dark() else "dark")
         self._dark_mode = Palette.is_dark()
+        self._save_settings()
         self._apply_theme()
 
     def _apply_theme(self) -> None:

@@ -1,8 +1,31 @@
+"""
+decoder.py – read .impak files and reconstruct images.
+
+Usage:
+
+    with ImpakReader("collection.impak") as r:
+        print(r.info())
+        img = r[0]              # by index  (baseline frames are hidden)
+        img = r["frame_00"]     # by name
+        for img in r:           # iterates content frames only
+            img.show()
+
+    # One-shot
+    images = ImpakReader.load_all("collection.impak")
+
+In manual-mode files, baseline keyframes are stored at the front of the raw
+index but are invisible to all public APIs: __len__, __getitem__, __iter__,
+get_metadata, and info all operate on content frames only.  The raw internal
+helpers (_decode_frame etc.) still use absolute frame IDs so that delta chains
+referencing baselines resolve correctly.
+"""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterator, List, Union
+from typing import Iterator, List, Union, Optional
+from collections import OrderedDict
 
 from PIL import Image
 
@@ -23,14 +46,40 @@ from .formats import (
 
 
 class ImpakReader:
-    def __init__(self, path: Union[str, Path]):
+    """
+    Random-access reader for .impak collections.
+
+    The file index is read at open time (small); pixel data is lazy-loaded
+    per frame request.
+
+    In manual-mode files the leading baseline keyframes are automatically
+    detected (via their {"_baseline": true} metadata) and excluded from all
+    public-facing operations.  They are still used internally when decoding
+    delta frames that reference them.
+    """
+
+    def __init__(
+            self,
+            path: Union[str, Path],
+            low_ram_mode: bool = False,
+            cache_size: Optional[int] = None,
+    ):
         self.path = Path(path)
         self._fh = open(self.path, "rb")
         self._header: dict = {}
         self._index: list[dict] = []
-        self._name_map: dict[str, int] = {}   # name → content_id
+        self._name_map: dict[str, int] = {}  # name → content_id
         self._meta_cache: dict[int, dict] = {}
-        self._decode_cache: dict[int, Image.Image] = {}
+
+        self.low_ram_mode = low_ram_mode
+        if cache_size is None:
+            cache_size = 2 if low_ram_mode else 0
+        self.cache_size = max(0, cache_size)
+
+        # abs_id -> Image.Image
+        # normal mode: unlimited dict-like cache
+        # low_ram_mode: bounded LRU cache
+        self._decode_cache: "OrderedDict[int, Image.Image]" = OrderedDict()
 
         self._read_header()
         self._read_index()
@@ -52,6 +101,12 @@ class ImpakReader:
         return self._header["frame_count"] - self._baseline_count
 
     def __getitem__(self, key: Union[int, str]) -> Image.Image:
+        """
+        Retrieve a content frame by index or name.
+
+        Integer indices are relative to content frames only (0 = first content
+        frame, regardless of how many baselines precede it).
+        """
         if isinstance(key, str):
             self._build_name_map()
             if key not in self._name_map:
@@ -69,10 +124,33 @@ class ImpakReader:
         for i in range(len(self)):
             yield self._decode_frame(self._content_to_abs(i))
 
+    def _cache_get(self, abs_id: int) -> Optional[Image.Image]:
+        img = self._decode_cache.get(abs_id)
+        if img is None:
+            return None
+        # LRU touch
+        self._decode_cache.move_to_end(abs_id)
+        return img.copy()
+
+    def _cache_put(self, abs_id: int, img: Image.Image) -> None:
+        if self.cache_size == 0:
+            return
+
+        self._decode_cache[abs_id] = img.copy()
+        self._decode_cache.move_to_end(abs_id)
+
+        if self.low_ram_mode:
+            while len(self._decode_cache) > self.cache_size:
+                self._decode_cache.popitem(last=False)
+
     def get_metadata(self, frame_id: int) -> dict:
+        """
+        Return the metadata dict for a content frame by content index.
+        """
         return self._read_metadata(self._content_to_abs(frame_id))
 
     def info(self) -> str:
+        """Human-readable summary of the collection."""
         h = self._header
         mode_name = MODE_NAMES.get(h["diff_mode"], "unknown")
         codec_name = CODEC_NAMES.get(h.get("codec", 0), "png")
@@ -90,9 +168,22 @@ class ImpakReader:
             + (f"  ({self._baseline_count} hidden baseline(s))" if self._baseline_count else ""),
             f"Size    : {total_bytes:,} bytes ({total_bytes/1024:.1f} KB)",
             "",
-            f"{'ID':>4}  {'Type':>9}  {'Ref':>4}  {'Patches':>7}  {'Bytes':>9}  Name",
-            "─" * 64,
         ]
+
+        frame_sizes = {self._frame_size(self._content_to_abs(i)) for i in range(n_content)}
+        mixed_sizes = len(frame_sizes) > 1
+
+        if mixed_sizes:
+            lines += [
+                f"{'ID':>4}  {'Type':>9}  {'Ref':>4}  {'Patches':>7}  {'Bytes':>9}  {'Size':>11}  Name",
+                "─" * 72,
+            ]
+        else:
+            lines += [
+                f"{'ID':>4}  {'Type':>9}  {'Ref':>4}  {'Patches':>7}  {'Bytes':>9}  Name",
+                "─" * 64,
+            ]
+
         for content_id in range(n_content):
             abs_id = self._content_to_abs(content_id)
             entry = self._index[abs_id]
@@ -108,23 +199,36 @@ class ImpakReader:
             data_bytes = self._frame_data_size(abs_id)
             meta = self._read_metadata(abs_id)
             name = meta.get("name", "")
-            lines.append(
-                f"{content_id:>4}  {ftype:>9}  {ref:>4}  "
-                f"{entry['patch_count']:>7}  {data_bytes:>9,}  {name}"
-            )
+            if mixed_sizes:
+                fw, fh = self._frame_size(abs_id)
+                size_str = f"{fw}×{fh}"
+                lines.append(
+                    f"{content_id:>4}  {ftype:>9}  {ref:>4}  "
+                    f"{entry['patch_count']:>7}  {data_bytes:>9,}  {size_str:>11}  {name}"
+                )
+            else:
+                lines.append(
+                    f"{content_id:>4}  {ftype:>9}  {ref:>4}  "
+                    f"{entry['patch_count']:>7}  {data_bytes:>9,}  {name}"
+                )
         return "\n".join(lines)
 
     def diff_map(self, frame_id: int) -> list[tuple[int, int, int, int]]:
+        """
+        Return the (x, y, w, h) patch rectangles for a content frame.
+        *frame_id* is a content-visible index.
+        """
         abs_id = self._content_to_abs(frame_id)
         entry = self._index[abs_id]
         if entry["frame_type"] == FRAME_KEYFRAME:
-            return [(0, 0, self._header["width"], self._header["height"])]
+            w, h = self._frame_size(abs_id)
+            return [(0, 0, w, h)]
         patches = self._read_patches(abs_id)
         return [(x, y, w, h) for (x, y, w, h, _) in patches]
 
     @property
     def canvas_size(self) -> tuple[int, int]:
-        return (self._header["width"], self._header["height"])
+        return self._header["width"], self._header["height"]
 
     @property
     def mode(self) -> str:
@@ -132,14 +236,38 @@ class ImpakReader:
 
     @property
     def baseline_count(self) -> int:
+        """Number of hidden baseline frames (0 for non-manual files)."""
         return self._baseline_count
 
+    def _frame_size(self, abs_id: int) -> tuple[int, int]:
+        """
+        Return (width, height) for a frame.
+
+        For files written with multi-size support the per-frame size is stored
+        in JSON metadata under "_size".  For older single-size files (or frames
+        that pre-date the feature) we fall back to the global canvas dimensions.
+        """
+        meta = self._read_metadata(abs_id)
+        if "_size" in meta:
+            return tuple(meta["_size"])
+        return self._header["width"], self._header["height"]
+
     def _content_to_abs(self, content_id: int) -> int:
+        """Convert a public content index to an absolute frame index."""
         return content_id + self._baseline_count
 
-    def _decode_frame(self, abs_id: int) -> Image.Image:
-        if abs_id in self._decode_cache:
-            return self._decode_cache[abs_id].copy()
+    def _decode_frame(self, abs_id: int, _memo: Optional[dict[int, Image.Image]] = None) -> Image.Image:
+        """Decode frame by absolute index (works for baselines too)."""
+        if _memo is None:
+            _memo = {}
+
+        if abs_id in _memo:
+            return _memo[abs_id].copy()
+
+        cached = self._cache_get(abs_id)
+        if cached is not None:
+            _memo[abs_id] = cached
+            return cached.copy()
 
         entry = self._index[abs_id]
         codec = self.codec
@@ -150,12 +278,13 @@ class ImpakReader:
             img = self._decompress_patch_to_image(patches[0][4], codec)
         else:
             ref_id = entry["ref_frame_id"]
-            ref_img = self._decode_frame(ref_id)
+            ref_img = self._decode_frame(ref_id, _memo=_memo)
             patches = self._read_patches(abs_id)
             img = reconstruct(ref_img, patches, codec=codec)
 
         img = img.convert("RGBA")
-        self._decode_cache[abs_id] = img
+        _memo[abs_id] = img
+        self._cache_put(abs_id, img)
         return img.copy()
 
     def _read_header(self):
@@ -222,6 +351,12 @@ class ImpakReader:
         return _decode_patch(compressed, codec=codec)
 
     def _detect_baseline_count(self) -> int:
+        """
+        Scan leading frames for the {"_baseline": true} metadata tag.
+        Returns the count of consecutive baseline frames at the front.
+        This is how the reader discovers how many frames to hide, without
+        any binary format change.
+        """
         count = 0
         total = self._header["frame_count"]
         for abs_id in range(total):
@@ -229,7 +364,7 @@ class ImpakReader:
             if meta.get("_baseline"):
                 count += 1
             else:
-                break
+                break   # baselines are always contiguous at the front
         return count
 
     @property
@@ -250,11 +385,24 @@ class ImpakReader:
                 self._name_map[meta["name"]] = abs_id
 
     @classmethod
-    def load_all(cls, path: Union[str, Path]) -> List[Image.Image]:
-        with cls(path) as r:
+    def load_all(
+            cls,
+            path: Union[str, Path],
+            low_ram_mode: bool = False,
+            cache_size: Optional[int] = None,
+    ) -> List[Image.Image]:
+        """Load every content frame and return as a list of PIL Images."""
+        with cls(path, low_ram_mode=low_ram_mode, cache_size=cache_size) as r:
             return list(r)
 
     @classmethod
-    def load_frame(cls, path: Union[str, Path], frame_id: int) -> Image.Image:
-        with cls(path) as r:
+    def load_frame(
+            cls,
+            path: Union[str, Path],
+            frame_id: int,
+            low_ram_mode: bool = False,
+            cache_size: Optional[int] = None,
+    ) -> Image.Image:
+        """Load a single content frame by content index."""
+        with cls(path, low_ram_mode=low_ram_mode, cache_size=cache_size) as r:
             return r[frame_id]

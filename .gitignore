@@ -11,3 +11,4 @@ wheels/
 uv.lock
 
 .idea
+impak-viewer/ipak-viewer-settings.json

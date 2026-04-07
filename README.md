@@ -4,13 +4,23 @@ In this repo,
 
 ## impak-viewer
 
-This is a multi-platform desktop GUI application to browse, view and export from impak files, written with PySide and built using Nuitka.Make sure Nuitka, Pyside6, impakdecoder and other platform-specific dependencies are present.
+This is a multi-platform desktop GUI application to browse, view and export from impak files, written with PySide and built using Nuitka. Make sure Nuitka, Pyside6, impakdecoder and other platform-specific dependencies are present.
 
-Built portable EXE binary for Windows x64 can be downloaded from release [impakViewer_msvc_x64.zip](https://github.com/puff-dayo/impak-app/releases/download/v26.03.19/impakViewer_msvc_x64.zip).
+Navigate frames using the left sidebar, the left/right arrow buttons in the toolbar, or arrow buttons on the keyboard. Press Ctrl + Mouse Wheel for finer control; panning with dragging on mouse hold. The app is available to be set to default for impak files, using the _Open With..._ menu on Windows.
+
+Default mode all frames decoded are cached for faster browsing, thumbnail generation, and repeated frame access. This uses A LOT OF memory. Low RAM mode limits cache to a small configurable size. This may be slower because frames may need to be decoded again more often.
+
+Built portable EXE binary for Windows x64 can be downloaded from release [impakViewer_msvc_x64.zip](https://github.com/puff-dayo/impak-app/releases/download/v26.04.08/impakViewer_msvc_x64.zip).
+
+## impak-toolbox
+
+WIP.
 
 ## impak-viewer-android
 
 This is an Android application to browse, view and export from impak files.
+
+Note: Google announced that as of September 2026, it will no longer be possible to develop apps for the Android platform without first providing government identification and paying a fee to Google. Let's wait and see.
 
 Navigate frames using the left/right arrow buttons in the toolbar, or quick-nav by swiping horizontally on the canvas. Tap the leftmost or rightmost 10% edge of the canvas to step one frame in either direction. Double-tap the image to zoom in incrementally, and use pinch-to-zoom for finer scale control; panning with two fingers holding is available when zoomed.
 

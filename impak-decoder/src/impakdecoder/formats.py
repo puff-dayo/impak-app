@@ -1,3 +1,15 @@
+"""
+Binary format definitions for .impak files.
+
+File layout:
+  [FileHeader]
+  [FrameIndexEntry × frame_count]   ← seekable index
+  [FrameBlock × frame_count]        ← actual data
+    each FrameBlock: [FrameHeader][PatchHeader+Data × patch_count][metadata bytes]
+
+All integers are little-endian.
+"""
+
 import struct
 
 MAGIC = b"IMPAK\x00"
